@@ -1,13 +1,13 @@
 { lib, stdenv, nodejs-slim, bundlerEnv, nixosTests
-, yarn, callPackage, imagemagick, ffmpeg, file, ruby_3_0, writeShellScript
-, fetchYarnDeps, fixup_yarn_lock
+, yarn-berry, callPackage, imagemagick, ffmpeg, file, ruby, writeShellScript
 , brotli
 
   # Allow building a fork or custom version of Mastodon:
 , pname ? "mastodon"
 , version ? srcOverride.version
+, patches ? []
   # src is a package
-, srcOverride ? callPackage ./source.nix {}
+, srcOverride ? callPackage ./source.nix { inherit patches; }
 , gemset ? ./. + "/gemset.nix"
 , yarnHash ? srcOverride.yarnHash
 }:
@@ -19,8 +19,7 @@ stdenv.mkDerivation rec {
 
   mastodonGems = bundlerEnv {
     name = "${pname}-gems-${version}";
-    inherit version gemset;
-    ruby = ruby_3_0;
+    inherit version gemset ruby;
     gemdir = src;
     # This fix (copied from https://github.com/NixOS/nixpkgs/pull/76765) replaces the gem
     # symlinks with directories, resolving this error when running rake:
@@ -40,12 +39,13 @@ stdenv.mkDerivation rec {
     pname = "${pname}-modules";
     inherit src version;
 
-    yarnOfflineCache = fetchYarnDeps {
-      yarnLock = "${src}/yarn.lock";
+    # use the fixed yarn berry offline cache thingy
+    yarnOfflineCache = callPackage ./yarn.nix {
+      inherit src;
       hash = yarnHash;
     };
 
-    nativeBuildInputs = [ fixup_yarn_lock nodejs-slim yarn mastodonGems mastodonGems.wrappedRuby brotli ];
+    nativeBuildInputs = [ nodejs-slim yarn-berry mastodonGems mastodonGems.wrappedRuby brotli ];
 
     RAILS_ENV = "production";
     NODE_ENV = "production";
@@ -57,9 +57,12 @@ stdenv.mkDerivation rec {
       # This option is needed for openssl-3 compatibility
       # Otherwise we encounter this upstream issue: https://github.com/mastodon/mastodon/issues/17924
       export NODE_OPTIONS=--openssl-legacy-provider
-      fixup_yarn_lock ~/yarn.lock
-      yarn config --offline set yarn-offline-mirror $yarnOfflineCache
-      yarn install --offline --frozen-lockfile --ignore-engines --ignore-scripts --no-progress
+
+      export YARN_ENABLE_TELEMETRY=0
+      mkdir -p ~/.yarn/berry
+      ln -sf $yarnOfflineCache ~/.yarn/berry/cache
+
+      yarn install --immutable --immutable-cache
 
       patchShebangs ~/bin
       patchShebangs ~/node_modules
@@ -69,7 +72,7 @@ stdenv.mkDerivation rec {
 
       OTP_SECRET=precompile_placeholder SECRET_KEY_BASE=precompile_placeholder \
         rails assets:precompile
-      yarn cache clean --offline
+      yarn cache clean
       rm -rf ~/node_modules/.cache
 
       # Create missing static gzip and brotli files
